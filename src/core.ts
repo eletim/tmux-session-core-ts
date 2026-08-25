@@ -6,8 +6,18 @@ const DEFAULT_SERVER_NAME = "tmux-session-core-ts";
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
 const SAFE_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const METADATA_OPTION_PREFIX = "@tmux_session_core_";
-const SESSION_FORMAT =
-  "#{session_name}|#{session_created}|#{session_attached}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_width}|#{pane_height}|#{q:pane_current_path}|#{q:pane_current_command}";
+const SESSION_FORMAT = [
+  "#{session_name}",
+  "#{session_created}",
+  "#{session_attached}",
+  "#{pane_pid}",
+  "#{pane_dead}",
+  "#{pane_dead_status}",
+  "#{pane_width}",
+  "#{pane_height}",
+  encodedFormat("pane_current_path"),
+  encodedFormat("pane_current_command"),
+].join("|");
 
 export interface Session {
   id: string;
@@ -264,7 +274,7 @@ function isMissingServer(error: unknown): boolean {
 }
 
 function parseSession(line: string): Session {
-  const fields = splitEscapedFields(line);
+  const fields = line.split("|");
   if (fields.length !== 10) {
     throw new Error(`Unexpected tmux session output: ${line}`);
   }
@@ -305,28 +315,30 @@ function parseSession(line: string): Session {
         : null,
     cols: parseInteger(cols, "pane_width"),
     rows: parseInteger(rows, "pane_height"),
-    cwd,
-    currentCommand,
+    cwd: decodeFormatValue(cwd),
+    currentCommand: decodeFormatValue(currentCommand),
   };
 }
 
-function splitEscapedFields(line: string): string[] {
-  const fields: string[] = [];
-  let field = "";
-  for (let index = 0; index < line.length; index += 1) {
-    const character = line[index];
-    if (character === "\\" && index + 1 < line.length) {
-      field += line[index + 1];
-      index += 1;
-    } else if (character === "|") {
-      fields.push(field);
-      field = "";
-    } else {
-      field += character;
+function encodedFormat(variable: string): string {
+  return `#{s/\\|/%7C/:#{s/\r/%0D/:#{s/\n/%0A/:#{s/%/%25/:${variable}}}}}`;
+}
+
+function decodeFormatValue(value: string): string {
+  return value.replace(/%(25|0A|0D|7C)/g, (encoded) => {
+    switch (encoded) {
+      case "%25":
+        return "%";
+      case "%0A":
+        return "\n";
+      case "%0D":
+        return "\r";
+      case "%7C":
+        return "|";
+      default:
+        return encoded;
     }
-  }
-  fields.push(field);
-  return fields;
+  });
 }
 
 function parseInteger(value: string, field: string): number {

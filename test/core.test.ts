@@ -5,7 +5,7 @@ import { SessionCore, SessionNotFoundError } from "../src/index.js";
 import type { TmuxRunner } from "../src/tmux.js";
 
 const SESSION_LINE =
-  "session-1|1700000000|0|1234|0||100|30|/work/with\\|pipe|bash\n";
+  "session-1|1700000000|0|1234|0||100|30|/work/with%7Cpipe|bash\n";
 
 class FakeTmux implements TmuxRunner {
   readonly calls: string[][] = [];
@@ -43,13 +43,14 @@ test("list and get derive native facts from tmux output", async () => {
 test("list reads native facts for multiple sessions with one tmux call", async () => {
   const tmux = new FakeTmux();
   tmux.outputFor = () =>
-    SESSION_LINE + "session-2|1700000001|0|5678|0||80|24|/other\\|cwd|node\n";
+    SESSION_LINE +
+    "session-2|1700000001|0|5678|0||80|24|/other%7C%0Acwd%25|node\n";
   const core = new SessionCore({ serverName: "test-server" }, tmux);
 
   const sessions = await core.list();
 
   assert.equal(sessions.length, 2);
-  assert.equal(sessions[1]?.cwd, "/other|cwd");
+  assert.equal(sessions[1]?.cwd, "/other|\ncwd%");
   assert.equal(sessions[1]?.currentCommand, "node");
   assert.equal(tmux.calls.length, 1);
 });
