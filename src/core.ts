@@ -7,7 +7,7 @@ const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
 const SAFE_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const METADATA_OPTION_PREFIX = "@tmux_session_core_";
 const SESSION_FORMAT =
-  "#{session_name}|#{session_created}|#{session_attached}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_width}|#{pane_height}";
+  "#{session_name}|#{session_created}|#{session_attached}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_width}|#{pane_height}|#{q:pane_current_path}|#{q:pane_current_command}";
 
 export interface Session {
   id: string;
@@ -21,8 +21,6 @@ export interface Session {
   cwd: string;
   currentCommand: string;
 }
-
-type SessionSummary = Omit<Session, "cwd" | "currentCommand">;
 
 export interface CreateSessionOptions {
   command: string;
@@ -97,21 +95,10 @@ export class SessionCore {
       throw error;
     }
 
-    const sessions = output
+    return output
       .split("\n")
       .filter((line) => line.length > 0)
       .map(parseSession);
-
-    return Promise.all(
-      sessions.map(async (session) => ({
-        ...session,
-        cwd: await this.readFormat(session.id, "#{pane_current_path}"),
-        currentCommand: await this.readFormat(
-          session.id,
-          "#{pane_current_command}",
-        ),
-      })),
-    );
   }
 
   async get(id: string): Promise<Session> {
@@ -200,17 +187,6 @@ export class SessionCore {
     await this.tmux.run(["set-option", "-u", "-t", id, optionName]);
   }
 
-  private async readFormat(id: string, format: string): Promise<string> {
-    const output = await this.tmux.run([
-      "display-message",
-      "-p",
-      "-t",
-      id,
-      format,
-    ]);
-    return removeOutputNewline(output);
-  }
-
   private async listManagedOptionNames(id: string): Promise<string[]> {
     const output = await this.tmux.run(["show-options", "-t", id]);
     return output
@@ -287,14 +263,35 @@ function isMissingServer(error: unknown): boolean {
   );
 }
 
-function parseSession(line: string): SessionSummary {
-  const fields = line.split("|");
-  if (fields.length !== 8) {
+function parseSession(line: string): Session {
+  const fields = splitEscapedFields(line);
+  if (fields.length !== 10) {
     throw new Error(`Unexpected tmux session output: ${line}`);
   }
 
-  const [id, created, attached, processId, dead, deadStatus, cols, rows] =
-    fields as [string, string, string, string, string, string, string, string];
+  const [
+    id,
+    created,
+    attached,
+    processId,
+    dead,
+    deadStatus,
+    cols,
+    rows,
+    cwd,
+    currentCommand,
+  ] = fields as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
 
   return {
     id,
@@ -308,7 +305,28 @@ function parseSession(line: string): SessionSummary {
         : null,
     cols: parseInteger(cols, "pane_width"),
     rows: parseInteger(rows, "pane_height"),
+    cwd,
+    currentCommand,
   };
+}
+
+function splitEscapedFields(line: string): string[] {
+  const fields: string[] = [];
+  let field = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === "\\" && index + 1 < line.length) {
+      field += line[index + 1];
+      index += 1;
+    } else if (character === "|") {
+      fields.push(field);
+      field = "";
+    } else {
+      field += character;
+    }
+  }
+  fields.push(field);
+  return fields;
 }
 
 function parseInteger(value: string, field: string): number {

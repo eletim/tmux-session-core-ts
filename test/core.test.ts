@@ -4,7 +4,8 @@ import test from "node:test";
 import { SessionCore, SessionNotFoundError } from "../src/index.js";
 import type { TmuxRunner } from "../src/tmux.js";
 
-const SESSION_LINE = "session-1|1700000000|0|1234|0||100|30\n";
+const SESSION_LINE =
+  "session-1|1700000000|0|1234|0||100|30|/work/with\\|pipe|bash\n";
 
 class FakeTmux implements TmuxRunner {
   readonly calls: string[][] = [];
@@ -36,19 +37,21 @@ test("list and get derive native facts from tmux output", async () => {
     currentCommand: "bash",
   });
   assert.equal(tmux.calls[0]?.[0], "list-sessions");
-  assert(
-    tmux.calls.some(
-      (call) =>
-        call[0] === "display-message" && call.at(-1) === "#{pane_current_path}",
-    ),
-  );
-  assert(
-    tmux.calls.some(
-      (call) =>
-        call[0] === "display-message" &&
-        call.at(-1) === "#{pane_current_command}",
-    ),
-  );
+  assert.equal(tmux.calls.length, 1);
+});
+
+test("list reads native facts for multiple sessions with one tmux call", async () => {
+  const tmux = new FakeTmux();
+  tmux.outputFor = () =>
+    SESSION_LINE + "session-2|1700000001|0|5678|0||80|24|/other\\|cwd|node\n";
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const sessions = await core.list();
+
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions[1]?.cwd, "/other|cwd");
+  assert.equal(sessions[1]?.currentCommand, "node");
+  assert.equal(tmux.calls.length, 1);
 });
 
 test("get rejects a session absent from tmux", async () => {
@@ -61,7 +64,7 @@ test("an exited pane may have no exit status yet", async () => {
   const tmux = new FakeTmux();
   tmux.outputFor = (args) => {
     if (args[0] === "list-sessions") {
-      return "session-1|1700000000|0|1234|1||80|24\n";
+      return "session-1|1700000000|0|1234|1||80|24|/work|bash\n";
     }
     return nativeSessionOutput(args);
   };
@@ -177,12 +180,6 @@ test("stop and delete use distinct tmux operations", async () => {
 function nativeSessionOutput(args: readonly string[]): string {
   if (args[0] === "list-sessions") {
     return SESSION_LINE;
-  }
-  if (args.at(-1) === "#{pane_current_path}") {
-    return "/work/with|pipe\n";
-  }
-  if (args.at(-1) === "#{pane_current_command}") {
-    return "bash\n";
   }
   return "";
 }
