@@ -28,18 +28,48 @@ async function createPhase(server: string): Promise<void> {
     rows: 30,
     command: "cat",
   });
-  assert((await core.list()).some((session) => session.id === sessionId));
-  assert.equal((await core.get(sessionId)).id, sessionId);
+  const created = await waitForCommand(core, "cat");
+  assert.equal(created.cwd, process.cwd());
+
+  await core.setMetadata(sessionId, "kind", "generic-client");
+  await core.setMetadata(sessionId, "title", "再発見テスト 🌏");
+  await core.setMetadata(sessionId, "empty", "");
+  setUnrelatedOption(server);
+
+  assert.equal(await core.getMetadata(sessionId, "kind"), "generic-client");
+  assert.equal(await core.getMetadata(sessionId, "title"), "再発見テスト 🌏");
+  assert.equal(await core.getMetadata(sessionId, "empty"), "");
   await core.input(sessionId, "hello-from-input");
   await waitForScreen(core, "hello-from-input");
-  console.log("create/list/get/input/screen passed; controller exiting");
+  console.log(
+    "create/native facts/metadata/input/screen passed; controller exiting",
+  );
 }
 
 async function rediscoverPhase(server: string): Promise<void> {
   const core = new SessionCore({ serverName: server });
-  assert((await core.list()).some((session) => session.id === sessionId));
-  assert.equal((await core.get(sessionId)).id, sessionId);
+  const rediscovered = (await core.list()).find(
+    (session) => session.id === sessionId,
+  );
+  assert(rediscovered);
+  assert.equal(rediscovered.cwd, process.cwd());
+  assert.equal(rediscovered.currentCommand, "cat");
+  assert.deepEqual(await core.listMetadata(sessionId), {
+    empty: "",
+    kind: "generic-client",
+    title: "再発見テスト 🌏",
+  });
+  assert.equal(await core.getMetadata(sessionId, "title"), "再発見テスト 🌏");
+  assert(!("cwd" in (await core.listMetadata(sessionId))));
+  assert(!("currentCommand" in (await core.listMetadata(sessionId))));
   await waitForScreen(core, "hello-from-input");
+
+  await core.setMetadata(sessionId, "title", "updated");
+  await core.deleteMetadata(sessionId, "empty");
+  assert.deepEqual(await core.listMetadata(sessionId), {
+    kind: "generic-client",
+    title: "updated",
+  });
 
   await core.stop(sessionId);
   await waitForExit(core);
@@ -49,7 +79,27 @@ async function rediscoverPhase(server: string): Promise<void> {
   await core.delete(sessionId);
   assert(!(await core.list()).some((session) => session.id === sessionId));
   await assert.rejects(core.get(sessionId), SessionNotFoundError);
-  console.log("rediscovery/stop/final screen/delete passed");
+  await assert.rejects(core.listMetadata(sessionId), SessionNotFoundError);
+  console.log(
+    "rediscovery/metadata update-delete/stop/final screen/session delete passed",
+  );
+}
+
+function setUnrelatedOption(server: string): void {
+  const result = spawnSync(
+    "tmux",
+    [
+      "-L",
+      server,
+      "set-option",
+      "-t",
+      sessionId,
+      "@unrelated_smoke_option",
+      "must-not-be-listed",
+    ],
+    { encoding: "utf8", stdio: "pipe" },
+  );
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function runController(controllerPhase: string, server: string): void {
@@ -91,6 +141,20 @@ async function waitForExit(core: SessionCore): Promise<void> {
     await delay(20);
   }
   throw new Error("Timed out waiting for the pane process to exit");
+}
+
+async function waitForCommand(
+  core: SessionCore,
+  expected: string,
+): Promise<Awaited<ReturnType<SessionCore["get"]>>> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const session = await core.get(sessionId);
+    if (session.currentCommand === expected) {
+      return session;
+    }
+    await delay(20);
+  }
+  throw new Error("Timed out waiting for current command: " + expected);
 }
 
 function delay(milliseconds: number): Promise<void> {
