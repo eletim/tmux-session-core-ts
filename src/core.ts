@@ -4,8 +4,20 @@ import { TmuxClient, TmuxCommandError, type TmuxRunner } from "./tmux.js";
 
 const DEFAULT_SERVER_NAME = "tmux-session-core-ts";
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
-const SESSION_FORMAT =
-  "#{session_name}|#{session_created}|#{session_attached}|#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_width}|#{pane_height}";
+const SAFE_METADATA_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const METADATA_OPTION_PREFIX = "@tmux_session_core_";
+const SESSION_FORMAT = [
+  "#{session_name}",
+  "#{session_created}",
+  "#{session_attached}",
+  "#{pane_pid}",
+  "#{pane_dead}",
+  "#{pane_dead_status}",
+  "#{pane_width}",
+  "#{pane_height}",
+  encodedFormat("pane_current_path"),
+  encodedFormat("pane_current_command"),
+].join("|");
 
 export interface Session {
   id: string;
@@ -16,6 +28,8 @@ export interface Session {
   exitCode: number | null;
   cols: number;
   rows: number;
+  cwd: string;
+  currentCommand: string;
 }
 
 export interface CreateSessionOptions {
@@ -145,6 +159,67 @@ export class SessionCore {
     await this.get(id);
     await this.tmux.run(["kill-session", "-t", id]);
   }
+
+  async setMetadata(id: string, key: string, value: string): Promise<void> {
+    const optionName = metadataOptionName(key);
+    await this.get(id);
+    await this.tmux.run(["set-option", "-t", id, optionName, value]);
+  }
+
+  async getMetadata(id: string, key: string): Promise<string | undefined> {
+    const optionName = metadataOptionName(key);
+    await this.get(id);
+    const optionNames = await this.listManagedOptionNames(id);
+    if (!optionNames.includes(optionName)) {
+      return undefined;
+    }
+    return this.readOption(id, optionName);
+  }
+
+  async listMetadata(id: string): Promise<Record<string, string>> {
+    await this.get(id);
+    const optionNames = await this.listManagedOptionNames(id);
+    const entries = await Promise.all(
+      optionNames.map(
+        async (optionName) =>
+          [
+            optionName.slice(METADATA_OPTION_PREFIX.length),
+            await this.readOption(id, optionName),
+          ] as const,
+      ),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  async deleteMetadata(id: string, key: string): Promise<void> {
+    const optionName = metadataOptionName(key);
+    await this.get(id);
+    await this.tmux.run(["set-option", "-u", "-t", id, optionName]);
+  }
+
+  private async listManagedOptionNames(id: string): Promise<string[]> {
+    const output = await this.tmux.run(["show-options", "-t", id]);
+    return output
+      .split("\n")
+      .map(optionNameFromLine)
+      .filter((name) => {
+        const key = name.slice(METADATA_OPTION_PREFIX.length);
+        return (
+          name.startsWith(METADATA_OPTION_PREFIX) && SAFE_METADATA_KEY.test(key)
+        );
+      });
+  }
+
+  private async readOption(id: string, optionName: string): Promise<string> {
+    const output = await this.tmux.run([
+      "show-options",
+      "-v",
+      "-t",
+      id,
+      optionName,
+    ]);
+    return removeOutputNewline(output);
+  }
 }
 
 function sizeArguments(cols?: number, rows?: number): string[] {
@@ -171,6 +246,24 @@ function assertSafeName(value: string, name: string): void {
   }
 }
 
+function metadataOptionName(key: string): string {
+  if (!SAFE_METADATA_KEY.test(key)) {
+    throw new TypeError(
+      "metadata key must start with a letter or number and contain only letters, numbers, _ and -",
+    );
+  }
+  return METADATA_OPTION_PREFIX + key;
+}
+
+function removeOutputNewline(output: string): string {
+  return output.endsWith("\n") ? output.slice(0, -1) : output;
+}
+
+function optionNameFromLine(line: string): string {
+  const separator = line.indexOf(" ");
+  return separator === -1 ? line : line.slice(0, separator);
+}
+
 function isMissingServer(error: unknown): boolean {
   return (
     error instanceof TmuxCommandError &&
@@ -182,12 +275,33 @@ function isMissingServer(error: unknown): boolean {
 
 function parseSession(line: string): Session {
   const fields = line.split("|");
-  if (fields.length !== 8) {
+  if (fields.length !== 10) {
     throw new Error(`Unexpected tmux session output: ${line}`);
   }
 
-  const [id, created, attached, processId, dead, deadStatus, cols, rows] =
-    fields as [string, string, string, string, string, string, string, string];
+  const [
+    id,
+    created,
+    attached,
+    processId,
+    dead,
+    deadStatus,
+    cols,
+    rows,
+    cwd,
+    currentCommand,
+  ] = fields as [
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+    string,
+  ];
 
   return {
     id,
@@ -201,7 +315,30 @@ function parseSession(line: string): Session {
         : null,
     cols: parseInteger(cols, "pane_width"),
     rows: parseInteger(rows, "pane_height"),
+    cwd: decodeFormatValue(cwd),
+    currentCommand: decodeFormatValue(currentCommand),
   };
+}
+
+function encodedFormat(variable: string): string {
+  return `#{s/\\|/%7C/:#{s/\r/%0D/:#{s/\n/%0A/:#{s/%/%25/:${variable}}}}}`;
+}
+
+function decodeFormatValue(value: string): string {
+  return value.replace(/%(25|0A|0D|7C)/g, (encoded) => {
+    switch (encoded) {
+      case "%25":
+        return "%";
+      case "%0A":
+        return "\n";
+      case "%0D":
+        return "\r";
+      case "%7C":
+        return "|";
+      default:
+        return encoded;
+    }
+  });
 }
 
 function parseInteger(value: string, field: string): number {
