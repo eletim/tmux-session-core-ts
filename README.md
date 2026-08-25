@@ -45,6 +45,7 @@ const session = await core.create({
 });
 
 await core.input(session.id, "hello");
+await core.input(session.id, "\u001b[A", { submit: false }); // raw TUI input
 console.log(await core.screen(session.id));
 
 await core.setMetadata(session.id, "title", "Client-owned title 🌏");
@@ -65,7 +66,9 @@ const core = new SessionCore({ serverName: "my-dedicated-server" });
 The public operations are `create`, `list`, `get`, `screen`, `input`, `resize`,
 `stop`, `delete`, `setMetadata`, `getMetadata`, `listMetadata`, and
 `deleteMetadata`. `input` sends the supplied text literally followed by Enter.
-IDs and server names accept letters, numbers, `_`, and `-`.
+IDs and server names accept letters, numbers, `_`, and `-`. `input` appends Enter
+by default; pass `{ submit: false }` for raw terminal bytes from an interactive
+client.
 
 Metadata keys must match `[A-Za-z0-9][A-Za-z0-9_-]*`. Values are strings;
 Unicode and the empty string are preserved. `getMetadata` returns `undefined`

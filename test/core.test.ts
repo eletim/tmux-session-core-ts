@@ -61,6 +61,28 @@ test("get rejects a session absent from tmux", async () => {
   await assert.rejects(core.get("missing"), SessionNotFoundError);
 });
 
+test("input can write raw terminal bytes without appending Enter", async () => {
+  const tmux = new FakeTmux();
+  tmux.outputFor = nativeSessionOutput;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  await core.input("session-1", "\u001b[A", { submit: false });
+
+  assert(
+    tmux.calls.some((call) =>
+      isSameCall(call, [
+        "send-keys",
+        "-t",
+        "session-1",
+        "-l",
+        "--",
+        "\u001b[A",
+      ]),
+    ),
+  );
+  assert.equal(tmux.calls.filter((call) => call.at(-1) === "Enter").length, 0);
+});
+
 test("an exited pane may have no exit status yet", async () => {
   const tmux = new FakeTmux();
   tmux.outputFor = (args) => {
