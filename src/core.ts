@@ -40,6 +40,11 @@ export interface CreateSessionOptions {
   rows?: number;
 }
 
+export interface InputOptions {
+  /** Append Enter after the literal bytes. Defaults to true for line-oriented callers. */
+  submit?: boolean;
+}
+
 export interface SessionCoreOptions {
   serverName?: string;
 }
@@ -127,10 +132,16 @@ export class SessionCore {
     return this.tmux.run(["capture-pane", "-p", "-J", "-S", "-", "-t", id]);
   }
 
-  async input(id: string, text: string): Promise<void> {
+  async input(
+    id: string,
+    text: string,
+    options: InputOptions = {},
+  ): Promise<void> {
     await this.get(id);
     await this.tmux.run(["send-keys", "-t", id, "-l", "--", text]);
-    await this.tmux.run(["send-keys", "-t", id, "Enter"]);
+    if (options.submit !== false) {
+      await this.tmux.run(["send-keys", "-t", id, "Enter"]);
+    }
   }
 
   async resize(id: string, cols: number, rows: number): Promise<void> {
