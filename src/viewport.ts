@@ -94,6 +94,7 @@ interface CursorPayload {
   vr: number;
   m: ViewportFormat;
   f: string;
+  vf: string;
 }
 
 interface ResolvedPosition {
@@ -253,10 +254,12 @@ async function captureViewport(
     position.format,
   );
   const latestFacts = await readTerminalFacts(tmux, id);
-  if (
-    !sameCaptureSnapshot(facts, latestFacts) &&
-    attempt < MAX_CAPTURE_RETRIES
-  ) {
+  if (!sameCaptureSnapshot(facts, latestFacts)) {
+    if (attempt >= MAX_CAPTURE_RETRIES) {
+      throw new Error(
+        `Terminal state did not stabilize while capturing session ${id}`,
+      );
+    }
     const geometryChanged =
       facts.cols !== latestFacts.cols ||
       facts.screenRows !== latestFacts.screenRows ||
@@ -297,6 +300,7 @@ async function captureViewport(
     vr: position.rows,
     m: position.format,
     f: fingerprint(firstRow(content)),
+    vf: fingerprint(content),
   });
 
   return {
@@ -356,8 +360,19 @@ async function resolveCursor(
   let clamped = offset !== unclamped;
 
   if (payload.o > 0 && !geometryChanged) {
-    const candidate = await captureRows(tmux, id, offset, 1, payload.m);
-    if (fingerprint(firstRow(candidate)) !== payload.f) {
+    const candidate = await captureRows(
+      tmux,
+      id,
+      offset,
+      payload.vr,
+      payload.m,
+    );
+    const compareFullViewport = facts.historyRows <= payload.h;
+    const candidateFingerprint = fingerprint(
+      compareFullViewport ? candidate : firstRow(candidate),
+    );
+    const expectedFingerprint = compareFullViewport ? payload.vf : payload.f;
+    if (candidateFingerprint !== expectedFingerprint) {
       rebased = true;
       const relative = relativeOffset(payload, facts.historyRows);
       const adjusted = clamp(relative, 0, facts.historyRows);
@@ -538,7 +553,9 @@ function isCursorPayload(value: unknown): value is CursorPayload {
     candidate.vr <= MAX_VIEWPORT_ROWS &&
     (candidate.m === "plain" || candidate.m === "ansi") &&
     typeof candidate.f === "string" &&
-    /^[a-f0-9]{16}$/.test(candidate.f)
+    /^[a-f0-9]{16}$/.test(candidate.f) &&
+    typeof candidate.vf === "string" &&
+    /^[a-f0-9]{16}$/.test(candidate.vf)
   );
 }
 

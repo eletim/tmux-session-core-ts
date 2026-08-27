@@ -23,6 +23,7 @@ class FakeTerminalTmux implements TmuxRunner {
   mouseUtf8 = false;
   mouseSgr = false;
   onNextCapture: (() => void) | undefined;
+  onEveryCapture: (() => void) | undefined;
 
   async run(args: readonly string[]): Promise<string> {
     this.calls.push([...args]);
@@ -40,6 +41,7 @@ class FakeTerminalTmux implements TmuxRunner {
           this.onNextCapture = undefined;
           callback();
         }
+        this.onEveryCapture?.();
         return this.capture(args);
       default:
         return "";
@@ -283,6 +285,43 @@ test("cursor restore reports a rebase detected during capture retry", async () =
   assert.equal(restored.screenRows, 2);
   assert.equal(restored.rebased, true);
   assert.equal(restored.content, "resized-1\nresized-2\n");
+});
+
+test("viewport fails instead of returning an exhausted unstable snapshot", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  tmux.onEveryCapture = () => {
+    tmux.history.push(`busy-${tmux.history.length}`);
+    tmux.historyBytes += 10;
+  };
+
+  await assert.rejects(
+    core.viewport("session-1"),
+    /Terminal state did not stabilize/,
+  );
+  assert.equal(
+    tmux.calls.filter((call) => call[0] === "capture-pane").length,
+    4,
+  );
+});
+
+test("full viewport fingerprint detects equal-size eviction after a repeated first row", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.history = ["old", "b", "same", "same"];
+  tmux.historyBytes = 100;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  assert.match(view.content, /^same\nsame\n/);
+
+  tmux.history = ["b", "same", "same", "new"];
+  const restored = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(restored.rebased, true);
+  assert.match(restored.content, /^same\nnew\n/);
 });
 
 test("mouse-owning applications receive internal SGR wheel input", async () => {
