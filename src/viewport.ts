@@ -21,6 +21,7 @@ const TERMINAL_FACTS_FORMAT = [
   "#{mouse_all_flag}",
   "#{mouse_utf8_flag}",
   "#{mouse_sgr_flag}",
+  "#{pid}:#{session_id}:#{pane_id}:#{session_created}",
 ].join("|");
 
 export type ViewportCursor = string & {
@@ -81,11 +82,13 @@ interface TerminalFacts {
   mouseAll: boolean;
   mouseUtf8: boolean;
   mouseSgr: boolean;
+  incarnation: string;
 }
 
 interface CursorPayload {
   v: 1;
   s: string;
+  i: string;
   o: number;
   h: number;
   hl?: number;
@@ -263,14 +266,19 @@ async function moveViewport(
         facts.cols !== latestFacts.cols ||
         facts.screenRows !== latestFacts.screenRows ||
         facts.alternate !== latestFacts.alternate;
+      const incarnationChanged = facts.incarnation !== latestFacts.incarnation;
       const historyChanged =
         facts.historyRows !== latestFacts.historyRows ||
         facts.historyLimit !== latestFacts.historyLimit ||
         facts.historyBytes !== latestFacts.historyBytes;
       const pureAppend =
-        !geometryChanged && isReliablePureAppend(facts, latestFacts);
+        !geometryChanged &&
+        !incarnationChanged &&
+        isReliablePureAppend(facts, latestFacts);
       let requestedSourceOffset = current.offset;
-      if (current.offset > 0 && pureAppend) {
+      if (incarnationChanged) {
+        requestedSourceOffset = 0;
+      } else if (current.offset > 0 && pureAppend) {
         requestedSourceOffset += latestFacts.historyRows - facts.historyRows;
       } else if (geometryChanged || historyChanged || sourceChanged) {
         requestedSourceOffset = Math.round(
@@ -291,6 +299,7 @@ async function moveViewport(
       );
       const rebased =
         current.rebased ||
+        incarnationChanged ||
         geometryChanged ||
         (current.offset > 0 &&
           ((historyChanged && !pureAppend) || (sourceChanged && !pureAppend)));
@@ -416,15 +425,20 @@ async function captureViewport(
       facts.cols !== latestFacts.cols ||
       facts.screenRows !== latestFacts.screenRows ||
       facts.alternate !== latestFacts.alternate;
+    const incarnationChanged = facts.incarnation !== latestFacts.incarnation;
     const historyChanged =
       facts.historyRows !== latestFacts.historyRows ||
       facts.historyLimit !== latestFacts.historyLimit ||
       facts.historyBytes !== latestFacts.historyBytes;
     const historyGrowth = latestFacts.historyRows - facts.historyRows;
     const pureAppend =
-      !geometryChanged && isReliablePureAppend(facts, latestFacts);
+      !geometryChanged &&
+      !incarnationChanged &&
+      isReliablePureAppend(facts, latestFacts);
     let requestedOffset = position.offset;
-    if (position.offset > 0 && pureAppend) {
+    if (incarnationChanged) {
+      requestedOffset = 0;
+    } else if (position.offset > 0 && pureAppend) {
       requestedOffset += historyGrowth;
     } else if (geometryChanged || historyChanged || contentChanged) {
       requestedOffset = Math.round(
@@ -442,7 +456,8 @@ async function captureViewport(
     const retryRebased =
       position.rebased ||
       (position.cursorAnchored &&
-        (geometryChanged ||
+        (incarnationChanged ||
+          geometryChanged ||
           (position.offset > 0 &&
             ((historyChanged && !pureAppend) ||
               (contentChanged && !pureAppend)))));
@@ -467,6 +482,7 @@ async function captureViewport(
   const cursor = encodeCursor({
     v: CURSOR_VERSION,
     s: id,
+    i: facts.incarnation,
     o: position.offset,
     h: facts.historyRows,
     hl: facts.historyLimit,
@@ -505,7 +521,8 @@ function sameCaptureSnapshot(
     before.cols === after.cols &&
     before.screenRows === after.screenRows &&
     before.dead === after.dead &&
-    before.alternate === after.alternate
+    before.alternate === after.alternate &&
+    before.incarnation === after.incarnation
   );
 }
 
@@ -515,6 +532,7 @@ function isReliablePureAppend(
 ): boolean {
   return (
     before.historyLimit === after.historyLimit &&
+    before.incarnation === after.incarnation &&
     after.historyRows > before.historyRows &&
     after.historyRows < after.historyLimit &&
     after.historyBytes >= before.historyBytes
@@ -529,6 +547,7 @@ async function resolveCursor(
   rows: number,
   format: ViewportFormat,
 ): Promise<ResolvedPosition> {
+  const incarnationChanged = payload.i !== facts.incarnation;
   const geometryChanged =
     payload.c !== facts.cols ||
     payload.r !== facts.screenRows ||
@@ -542,10 +561,12 @@ async function resolveCursor(
     facts.historyBytes >= payload.hb;
   const historyChanged =
     payload.h !== facts.historyRows || payload.hb !== facts.historyBytes;
-  let rebased = geometryChanged;
+  let rebased = incarnationChanged || geometryChanged;
   let offset: number;
 
-  if (payload.o === 0) {
+  if (incarnationChanged) {
+    offset = 0;
+  } else if (payload.o === 0) {
     offset = 0;
   } else if (!geometryChanged && historyUnchanged) {
     offset = payload.o;
@@ -561,7 +582,7 @@ async function resolveCursor(
   let clamped = offset !== unclamped;
   let expectedViewportFingerprint: string | undefined;
 
-  if (payload.o > 0 && !geometryChanged) {
+  if (payload.o > 0 && !incarnationChanged && !geometryChanged) {
     const candidateOffset = offset;
     const candidate = await captureRows(
       tmux,
@@ -619,7 +640,7 @@ async function readTerminalFacts(
     TERMINAL_FACTS_FORMAT,
   ]);
   const fields = output.trimEnd().split("|");
-  if (fields.length !== 12) {
+  if (fields.length !== 13) {
     throw new Error(`Unexpected terminal state for session ${id}: ${output}`);
   }
   const [
@@ -635,7 +656,9 @@ async function readTerminalFacts(
     mouseAll,
     mouseUtf8,
     mouseSgr,
+    incarnation,
   ] = fields as [
+    string,
     string,
     string,
     string,
@@ -663,6 +686,7 @@ async function readTerminalFacts(
     mouseAll: parseFlag(mouseAll),
     mouseUtf8: parseFlag(mouseUtf8),
     mouseSgr: parseFlag(mouseSgr),
+    incarnation: parseIncarnation(incarnation),
   };
 }
 
@@ -810,6 +834,8 @@ function isCursorPayload(value: unknown): value is CursorPayload {
   return (
     candidate.v === CURSOR_VERSION &&
     typeof candidate.s === "string" &&
+    typeof candidate.i === "string" &&
+    candidate.i.length > 0 &&
     isNonNegativeInteger(candidate.o) &&
     isNonNegativeInteger(candidate.h) &&
     candidate.o <= candidate.h &&
@@ -942,6 +968,13 @@ function parsePositiveFactInteger(value: string, name: string): number {
 
 function parseFlag(value: string): boolean {
   return value === "1";
+}
+
+function parseIncarnation(value: string): string {
+  if (value.length === 0) {
+    throw new Error("Unexpected terminal incarnation");
+  }
+  return value;
 }
 
 function firstRow(content: string): string {

@@ -23,6 +23,7 @@ class FakeTerminalTmux implements TmuxRunner {
   mouseAll = false;
   mouseUtf8 = false;
   mouseSgr = false;
+  incarnation = "100:$1:%1:1700000000";
   ansiContinuous = false;
   onNextCapture: (() => void) | undefined;
   onEveryCapture: (() => void) | undefined;
@@ -86,6 +87,7 @@ class FakeTerminalTmux implements TmuxRunner {
         Number(this.mouseAll),
         Number(this.mouseUtf8),
         Number(this.mouseSgr),
+        this.incarnation,
       ].join("|") + "\n"
     );
   }
@@ -233,6 +235,39 @@ test("an emitted cursor remains valid for a long session id", async () => {
   });
   assert.equal(restored.content, view.content);
   assert.equal(restored.rebased, false);
+});
+
+test("a cursor rebases when the same session id has a new incarnation", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const oldView = await core.viewport("session-1");
+
+  tmux.incarnation = "200:$1:%1:1700000001";
+  tmux.history = [
+    "new-history-1",
+    "new-history-2",
+    "new-history-3",
+    "new-history-4",
+  ];
+  tmux.screen = [
+    "new-screen-1",
+    "new-screen-2",
+    "new-screen-3",
+    "new-screen-4",
+  ];
+  const rebased = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: oldView.cursor },
+  });
+
+  assert.equal(rebased.live, true);
+  assert.equal(rebased.rebased, true);
+  assert.match(rebased.content, /^new-screen-1\n/);
+
+  const roundTrip = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: rebased.cursor },
+  });
+  assert.equal(roundTrip.content, rebased.content);
+  assert.equal(roundTrip.rebased, false);
 });
 
 test("pure append below history limit preserves its anchor without rebasing", async () => {

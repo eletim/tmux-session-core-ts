@@ -173,6 +173,38 @@ test(
       assert(afterEviction.historyRows <= 20);
     });
 
+    await t.test(
+      "same-name session recreation rebases an old cursor",
+      async () => {
+        await core.create({
+          id: "recreated",
+          cwd: process.cwd(),
+          cols: 20,
+          rows: 5,
+          command: "sh -c 'printf OLD-SESSION; exec sleep 30'",
+        });
+        await waitForScreen(core, "recreated", "OLD-SESSION");
+        const oldView = await core.viewport("recreated");
+
+        await core.delete("recreated");
+        await core.create({
+          id: "recreated",
+          cwd: process.cwd(),
+          cols: 20,
+          rows: 5,
+          command: "sh -c 'printf NEW-SESSION; exec sleep 30'",
+        });
+        await waitForScreen(core, "recreated", "NEW-SESSION");
+        const rebased = await core.viewport("recreated", {
+          target: { kind: "cursor", cursor: oldView.cursor },
+        });
+
+        assert.equal(rebased.rebased, true);
+        assert.equal(rebased.live, true);
+        assert.match(rebased.content, /NEW-SESSION/);
+      },
+    );
+
     await t.test("ANSI capture preserves styling", async () => {
       await core.create({
         id: "ansi",
