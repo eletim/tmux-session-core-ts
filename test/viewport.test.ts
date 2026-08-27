@@ -22,6 +22,7 @@ class FakeTerminalTmux implements TmuxRunner {
   mouseAll = false;
   mouseUtf8 = false;
   mouseSgr = false;
+  onNextCapture: (() => void) | undefined;
 
   async run(args: readonly string[]): Promise<string> {
     this.calls.push([...args]);
@@ -33,6 +34,11 @@ class FakeTerminalTmux implements TmuxRunner {
       case "capture-pane":
         if (args.includes("-J")) {
           return "legacy-history-and-screen\n";
+        }
+        if (this.onNextCapture !== undefined) {
+          const callback = this.onNextCapture;
+          this.onNextCapture = undefined;
+          callback();
         }
         return this.capture(args);
       default:
@@ -207,6 +213,58 @@ test("history eviction and resize are detected and deterministically rebased", a
   });
   assert.equal(resized.rebased, true);
   assert.match(resized.content, /^wide-1\n/);
+});
+
+test("cursor viewport rows clamp after a pane height decrease", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1");
+
+  tmux.screen = ["short-1", "short-2"];
+  const restored = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(restored.viewportRows, 2);
+  assert.equal(restored.screenRows, 2);
+  assert.equal(restored.rebased, true);
+  await assert.rejects(
+    core.viewport("session-1", {
+      target: { kind: "cursor", cursor: view.cursor },
+      rows: 4,
+    }),
+    /must not exceed the terminal screen rows/,
+  );
+});
+
+test("viewport retries when output changes between facts and capture", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  tmux.onNextCapture = () => {
+    tmux.history.push("history-5");
+    tmux.historyBytes += 100;
+  };
+
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  assert.equal(
+    tmux.calls.filter((call) => call[0] === "capture-pane").length,
+    2,
+  );
+  const restored = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.match(view.content, /^history-3\n/);
+  assert.equal(view.historyRows, 5);
+  assert.equal(view.rebased, false);
+  assert.equal(restored.content, view.content);
+  assert.equal(restored.rebased, false);
+  assert.equal(
+    tmux.calls.filter((call) => call[0] === "capture-pane").length,
+    4,
+  );
 });
 
 test("mouse-owning applications receive internal SGR wheel input", async () => {

@@ -6,6 +6,7 @@ const CURSOR_VERSION = 1;
 const MAX_CURSOR_LENGTH = 4096;
 const MAX_VIEWPORT_ROWS = 10_000;
 const MAX_SCROLL_LINES = 10_000;
+const MAX_CAPTURE_RETRIES = 3;
 const TERMINAL_FACTS_FORMAT = [
   "#{history_size}",
   "#{history_limit}",
@@ -117,7 +118,11 @@ export async function readViewport(
       ? decodeCursor(options.target.cursor, id)
       : undefined;
   const facts = await readTerminalFacts(tmux, id);
-  const rows = resolveRows(options.rows ?? payload?.vr, facts.screenRows);
+  const rows = resolveRequestedRows(
+    options.rows,
+    payload?.vr,
+    facts.screenRows,
+  );
   const format = resolveFormat(options.format ?? payload?.m);
 
   let position: ResolvedPosition;
@@ -149,7 +154,7 @@ export async function applyScroll(
   const payload =
     intent.cursor === undefined ? undefined : decodeCursor(intent.cursor, id);
   const facts = await readTerminalFacts(tmux, id);
-  const rows = resolveRows(intent.rows ?? payload?.vr, facts.screenRows);
+  const rows = resolveRequestedRows(intent.rows, payload?.vr, facts.screenRows);
   const format = resolveFormat(intent.format ?? payload?.m);
   const resolved =
     payload === undefined
@@ -232,6 +237,7 @@ async function captureViewport(
   id: string,
   facts: TerminalFacts,
   position: ViewportPosition,
+  attempt = 0,
 ): Promise<TerminalViewport> {
   const content = await captureRows(
     tmux,
@@ -240,6 +246,39 @@ async function captureViewport(
     position.rows,
     position.format,
   );
+  const latestFacts = await readTerminalFacts(tmux, id);
+  if (
+    !sameCaptureSnapshot(facts, latestFacts) &&
+    attempt < MAX_CAPTURE_RETRIES
+  ) {
+    const geometryChanged =
+      facts.cols !== latestFacts.cols ||
+      facts.screenRows !== latestFacts.screenRows ||
+      facts.alternate !== latestFacts.alternate;
+    const historyGrowth = latestFacts.historyRows - facts.historyRows;
+    const requestedOffset =
+      !geometryChanged && position.offset > 0 && historyGrowth >= 0
+        ? position.offset + historyGrowth
+        : Math.round(
+            (position.offset / Math.max(facts.historyRows, 1)) *
+              latestFacts.historyRows,
+          );
+    const offset = clamp(requestedOffset, 0, latestFacts.historyRows);
+
+    return captureViewport(
+      tmux,
+      id,
+      latestFacts,
+      {
+        ...position,
+        offset,
+        rows: Math.min(position.rows, latestFacts.screenRows),
+        clamped: position.clamped || offset !== requestedOffset,
+        rebased: position.rebased,
+      },
+      attempt + 1,
+    );
+  }
   const cursor = encodeCursor({
     v: CURSOR_VERSION,
     s: id,
@@ -266,6 +305,21 @@ async function captureViewport(
     clamped: position.clamped,
     rebased: position.rebased,
   };
+}
+
+function sameCaptureSnapshot(
+  before: TerminalFacts,
+  after: TerminalFacts,
+): boolean {
+  return (
+    before.historyRows === after.historyRows &&
+    before.historyLimit === after.historyLimit &&
+    before.historyBytes === after.historyBytes &&
+    before.cols === after.cols &&
+    before.screenRows === after.screenRows &&
+    before.dead === after.dead &&
+    before.alternate === after.alternate
+  );
 }
 
 async function resolveCursor(
@@ -543,6 +597,20 @@ function resolveRows(rows: number | undefined, screenRows: number): number {
     );
   }
   return resolved;
+}
+
+function resolveRequestedRows(
+  explicitRows: number | undefined,
+  cursorRows: number | undefined,
+  screenRows: number,
+): number {
+  if (explicitRows !== undefined) {
+    return resolveRows(explicitRows, screenRows);
+  }
+  return resolveRows(
+    cursorRows === undefined ? undefined : Math.min(cursorRows, screenRows),
+    screenRows,
+  );
 }
 
 function assertRequestedRows(rows: number): void {
