@@ -175,7 +175,7 @@ test("cursor scrolling and fraction seeking use independent positions", async ()
   assert.match(oldest.content, /^history-1\n/);
 });
 
-test("history growth rebases an old cursor while preserving its first row", async () => {
+test("pure append below history limit preserves its anchor without rebasing", async () => {
   const tmux = new FakeTerminalTmux();
   const core = new SessionCore({ serverName: "test-server" }, tmux);
   const view = await core.viewport("session-1", {
@@ -188,8 +188,74 @@ test("history growth rebases an old cursor while preserving its first row", asyn
     target: { kind: "cursor", cursor: view.cursor },
   });
 
-  assert.equal(restored.rebased, true);
+  assert.equal(restored.rebased, false);
   assert.match(restored.content, /^history-3\n/);
+});
+
+test("net-positive growth at history limit deterministically rebases", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.historyLimit = 100;
+  tmux.history = Array.from({ length: 50 }, (_, index) => `old-${index + 1}`);
+  tmux.historyBytes = 500;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  assert.match(view.content, /^old-26\n/);
+
+  tmux.onNextCapture = () => {
+    const appended = Array.from(
+      { length: 75 },
+      (_, index) => `new-${index + 1}`,
+    );
+    tmux.history = [...tmux.history, ...appended].slice(-tmux.historyLimit);
+    tmux.historyBytes = 1_000;
+  };
+  const rebased = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(rebased.historyRows, 100);
+  assert.equal(rebased.rebased, true);
+  assert.equal(rebased.clamped, false);
+  assert.match(rebased.content, /^new-26\n/);
+  assert.doesNotMatch(rebased.content, /^new-1\n/);
+
+  const roundTrip = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: rebased.cursor },
+  });
+  assert.equal(roundTrip.content, rebased.content);
+  assert.equal(roundTrip.rebased, false);
+  assert.equal(roundTrip.clamped, false);
+});
+
+test("limit-crossing rebase does not trust repeated blank fingerprints", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.historyLimit = 100;
+  tmux.history = Array.from({ length: 50 }, () => "");
+  tmux.historyBytes = 50;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+
+  tmux.onNextCapture = () => {
+    tmux.history = [
+      ...tmux.history,
+      ...Array.from({ length: 75 }, () => ""),
+    ].slice(-tmux.historyLimit);
+    tmux.historyBytes = 100;
+  };
+  const rebased = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(rebased.rebased, true);
+  const roundTrip = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: rebased.cursor },
+  });
+  assert.equal(roundTrip.content, rebased.content);
+  assert.equal(roundTrip.rebased, false);
 });
 
 test("history eviction and resize are detected and deterministically rebased", async () => {

@@ -87,6 +87,7 @@ interface CursorPayload {
   s: string;
   o: number;
   h: number;
+  hl?: number;
   hb: number;
   c: number;
   r: number;
@@ -265,8 +266,9 @@ async function captureViewport(
       facts.screenRows !== latestFacts.screenRows ||
       facts.alternate !== latestFacts.alternate;
     const historyGrowth = latestFacts.historyRows - facts.historyRows;
+    const pureAppend = isReliablePureAppend(facts, latestFacts);
     const requestedOffset =
-      !geometryChanged && position.offset > 0 && historyGrowth >= 0
+      !geometryChanged && position.offset > 0 && pureAppend
         ? position.offset + historyGrowth
         : Math.round(
             (position.offset / Math.max(facts.historyRows, 1)) *
@@ -293,6 +295,7 @@ async function captureViewport(
     s: id,
     o: position.offset,
     h: facts.historyRows,
+    hl: facts.historyLimit,
     hb: facts.historyBytes,
     c: facts.cols,
     r: facts.screenRows,
@@ -332,6 +335,18 @@ function sameCaptureSnapshot(
   );
 }
 
+function isReliablePureAppend(
+  before: TerminalFacts,
+  after: TerminalFacts,
+): boolean {
+  return (
+    before.historyLimit === after.historyLimit &&
+    after.historyRows > before.historyRows &&
+    after.historyRows < after.historyLimit &&
+    after.historyBytes >= before.historyBytes
+  );
+}
+
 async function resolveCursor(
   tmux: TmuxRunner,
   id: string,
@@ -342,17 +357,27 @@ async function resolveCursor(
     payload.c !== facts.cols ||
     payload.r !== facts.screenRows ||
     payload.a !== facts.alternate;
+  const historyUnchanged =
+    payload.h === facts.historyRows && payload.hb === facts.historyBytes;
+  const pureAppend =
+    payload.hl === facts.historyLimit &&
+    facts.historyRows > payload.h &&
+    facts.historyRows < facts.historyLimit &&
+    facts.historyBytes >= payload.hb;
   const historyChanged =
     payload.h !== facts.historyRows || payload.hb !== facts.historyBytes;
-  let rebased = geometryChanged || historyChanged;
+  let rebased = geometryChanged;
   let offset: number;
 
   if (payload.o === 0) {
     offset = 0;
-  } else if (!geometryChanged && facts.historyRows >= payload.h) {
+  } else if (!geometryChanged && historyUnchanged) {
+    offset = payload.o;
+  } else if (!geometryChanged && pureAppend) {
     offset = payload.o + (facts.historyRows - payload.h);
   } else {
     offset = relativeOffset(payload, facts.historyRows);
+    rebased ||= historyChanged;
   }
 
   const unclamped = offset;
@@ -367,7 +392,7 @@ async function resolveCursor(
       payload.vr,
       payload.m,
     );
-    const compareFullViewport = facts.historyRows <= payload.h;
+    const compareFullViewport = !pureAppend;
     const candidateFingerprint = fingerprint(
       compareFullViewport ? candidate : firstRow(candidate),
     );
@@ -545,6 +570,7 @@ function isCursorPayload(value: unknown): value is CursorPayload {
     isNonNegativeInteger(candidate.o) &&
     isNonNegativeInteger(candidate.h) &&
     candidate.o <= candidate.h &&
+    (candidate.hl === undefined || isNonNegativeInteger(candidate.hl)) &&
     isNonNegativeInteger(candidate.hb) &&
     isPositiveInteger(candidate.c) &&
     isPositiveInteger(candidate.r) &&
