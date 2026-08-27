@@ -10,6 +10,7 @@ import type { TmuxRunner } from "../src/tmux.js";
 
 class FakeTerminalTmux implements TmuxRunner {
   readonly calls: string[][] = [];
+  id = "session-1";
   history = ["history-1", "history-2", "history-3", "history-4"];
   screen = ["screen-1", "screen-2", "screen-3", "screen-4"];
   cols = 80;
@@ -22,6 +23,7 @@ class FakeTerminalTmux implements TmuxRunner {
   mouseAll = false;
   mouseUtf8 = false;
   mouseSgr = false;
+  ansiContinuous = false;
   onNextCapture: (() => void) | undefined;
   onEveryCapture: (() => void) | undefined;
   onCapture: ((captureNumber: number) => void) | undefined;
@@ -55,7 +57,7 @@ class FakeTerminalTmux implements TmuxRunner {
   private sessionLine(): string {
     return (
       [
-        "session-1",
+        this.id,
         "1700000000",
         "0",
         "1234",
@@ -94,11 +96,20 @@ class FakeTerminalTmux implements TmuxRunner {
     const allRows = [...this.history, ...this.screen];
     const first = start + this.history.length;
     const last = end + this.history.length;
+    const rows = allRows.slice(
+      Math.max(first, 0),
+      Math.min(last + 1, allRows.length),
+    );
+    if (args.includes("-e") && this.ansiContinuous) {
+      return (
+        rows
+          .map((row, index) => (index === 0 ? `\u001b[31m${row}` : row))
+          .join("\n") + "\u001b[0m\n"
+      );
+    }
     return (
-      allRows
-        .slice(Math.max(first, 0), Math.min(last + 1, allRows.length))
-        .map((row) => (args.includes("-e") ? ansiRow(row) : row))
-        .join("\n") + "\n"
+      rows.map((row) => (args.includes("-e") ? ansiRow(row) : row)).join("\n") +
+      "\n"
     );
   }
 }
@@ -207,6 +218,21 @@ test("cursor scrolling and fraction seeking use independent positions", async ()
     target: { kind: "fraction", value: 0 },
   });
   assert.match(oldest.content, /^history-1\n/);
+});
+
+test("an emitted cursor remains valid for a long session id", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.id = "s".repeat(3_000);
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const view = await core.viewport(tmux.id);
+  assert(view.cursor.length > 4_096);
+
+  const restored = await core.viewport(tmux.id, {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+  assert.equal(restored.content, view.content);
+  assert.equal(restored.rebased, false);
 });
 
 test("pure append below history limit preserves its anchor without rebasing", async () => {
@@ -688,6 +714,27 @@ test("ANSI viewport requests styled physical rows", async () => {
   const capture = tmux.calls.find((call) => call[0] === "capture-pane");
   assert(capture?.includes("-e"));
   assert(!capture?.includes("-J"));
+});
+
+test("ANSI cursor scroll preserves styles that continue across rows", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.ansiContinuous = true;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+    rows: 2,
+    format: "ansi",
+  });
+
+  const result = await core.scroll("session-1", {
+    cursor: view.cursor,
+    direction: "up",
+    lines: 1,
+  });
+
+  assert.equal(result.kind, "viewport");
+  assert.equal(result.viewport.rebased, false);
+  assert(result.viewport.content.startsWith("\u001b[31m"));
 });
 
 test("invalid viewport requests fail before capture or input", async () => {

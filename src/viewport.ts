@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { TmuxRunner } from "./tmux.js";
 
 const CURSOR_VERSION = 1;
-const MAX_CURSOR_LENGTH = 4096;
+const MAX_CURSOR_BASE_LENGTH = 4096;
 const MAX_VIEWPORT_ROWS = 10_000;
 const MAX_SCROLL_LINES = 10_000;
 const MAX_CAPTURE_RETRIES = 3;
@@ -249,6 +249,7 @@ async function moveViewport(
     const latestFacts = await readTerminalFacts(tmux, id);
     const snapshotChanged = !sameCaptureSnapshot(facts, latestFacts);
     const sourceChanged =
+      !pair.consistent ||
       current.expectedViewportFingerprint === undefined ||
       fingerprint(pair.source) !== current.expectedViewportFingerprint;
 
@@ -337,7 +338,30 @@ async function captureScrollPair(
   destinationOffset: number,
   rows: number,
   format: ViewportFormat,
-): Promise<{ source: string; destination: string }> {
+): Promise<{ source: string; destination: string; consistent: boolean }> {
+  if (format === "ansi") {
+    const sourceBefore = await captureRows(
+      tmux,
+      id,
+      sourceOffset,
+      rows,
+      format,
+    );
+    const destination = await captureRows(
+      tmux,
+      id,
+      destinationOffset,
+      rows,
+      format,
+    );
+    const sourceAfter = await captureRows(tmux, id, sourceOffset, rows, format);
+    return {
+      source: sourceAfter,
+      destination,
+      consistent: fingerprint(sourceBefore) === fingerprint(sourceAfter),
+    };
+  }
+
   const oldestOffset = Math.max(sourceOffset, destinationOffset);
   const newestOffset = Math.min(sourceOffset, destinationOffset);
   const content = await captureRows(
@@ -358,6 +382,7 @@ async function captureScrollPair(
   return {
     source: viewportAt(sourceOffset),
     destination: viewportAt(destinationOffset),
+    consistent: true,
   };
 }
 
@@ -750,7 +775,7 @@ function decodeCursor(cursor: ViewportCursor, id: string): CursorPayload {
   if (
     typeof cursor !== "string" ||
     cursor.length === 0 ||
-    cursor.length > MAX_CURSOR_LENGTH ||
+    cursor.length > maxCursorLengthForSession(id) ||
     !/^[A-Za-z0-9_-]+$/.test(cursor)
   ) {
     throw invalidCursor();
@@ -767,6 +792,14 @@ function decodeCursor(cursor: ViewportCursor, id: string): CursorPayload {
     throw invalidCursor();
   }
   return value;
+}
+
+function maxCursorLengthForSession(id: string): number {
+  const encodedSessionBytes = Buffer.byteLength(JSON.stringify(id), "utf8") - 2;
+  return (
+    MAX_CURSOR_BASE_LENGTH +
+    Math.ceil((Math.max(encodedSessionBytes, 0) * 4) / 3)
+  );
 }
 
 function isCursorPayload(value: unknown): value is CursorPayload {
