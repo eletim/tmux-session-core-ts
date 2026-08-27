@@ -348,50 +348,20 @@ async function captureScrollPair(
   rows: number,
   format: ViewportFormat,
 ): Promise<{ source: string; destination: string; consistent: boolean }> {
-  if (format === "ansi") {
-    const sourceBefore = await captureRows(
-      tmux,
-      id,
-      sourceOffset,
-      rows,
-      format,
-    );
-    const destination = await captureRows(
-      tmux,
-      id,
-      destinationOffset,
-      rows,
-      format,
-    );
-    const sourceAfter = await captureRows(tmux, id, sourceOffset, rows, format);
-    return {
-      source: sourceAfter,
-      destination,
-      consistent: fingerprint(sourceBefore) === fingerprint(sourceAfter),
-    };
-  }
-
-  const oldestOffset = Math.max(sourceOffset, destinationOffset);
-  const newestOffset = Math.min(sourceOffset, destinationOffset);
-  const content = await captureRows(
+  const sourceBefore = await captureRows(tmux, id, sourceOffset, rows, format);
+  const destination = await captureRows(
     tmux,
     id,
-    oldestOffset,
-    oldestOffset - newestOffset + rows,
+    destinationOffset,
+    rows,
     format,
   );
-  const physicalRows = content.endsWith("\n")
-    ? content.slice(0, -1).split("\n")
-    : content.split("\n");
-  const viewportAt = (offset: number): string => {
-    const start = oldestOffset - offset;
-    return physicalRows.slice(start, start + rows).join("\n") + "\n";
-  };
+  const sourceAfter = await captureRows(tmux, id, sourceOffset, rows, format);
 
   return {
-    source: viewportAt(sourceOffset),
-    destination: viewportAt(destinationOffset),
-    consistent: true,
+    source: sourceAfter,
+    destination,
+    consistent: fingerprint(sourceBefore) === fingerprint(sourceAfter),
   };
 }
 

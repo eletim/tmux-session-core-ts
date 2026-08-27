@@ -222,6 +222,38 @@ test("cursor scrolling and fraction seeking use independent positions", async ()
   assert.match(oldest.content, /^history-1\n/);
 });
 
+test("large cursor moves capture only bounded endpoint viewports", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.history = Array.from({ length: 10_000 }, (_, index) => `row-${index}`);
+  tmux.historyBytes = 1_000_000;
+  tmux.historyLimit = 20_000;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const live = await core.viewport("session-1", { rows: 4 });
+  const callsBefore = tmux.calls.length;
+
+  const result = await core.scroll("session-1", {
+    cursor: live.cursor,
+    direction: "up",
+    lines: 10_000,
+    rows: 4,
+  });
+
+  assert.equal(result.kind, "viewport");
+  const captures = tmux.calls
+    .slice(callsBefore)
+    .filter((call) => call[0] === "capture-pane");
+  assert(captures.length >= 3);
+  assert(
+    captures.every(
+      (call) =>
+        Number(argumentAfter(call, "-E")) -
+          Number(argumentAfter(call, "-S")) +
+          1 <=
+        4,
+    ),
+  );
+});
+
 test("an emitted cursor remains valid for a long session id", async () => {
   const tmux = new FakeTerminalTmux();
   tmux.id = "s".repeat(3_000);
