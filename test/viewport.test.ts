@@ -267,6 +267,24 @@ test("viewport retries when output changes between facts and capture", async () 
   );
 });
 
+test("cursor restore reports a rebase detected during capture retry", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1");
+  tmux.onNextCapture = () => {
+    tmux.screen = ["resized-1", "resized-2"];
+  };
+
+  const restored = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(restored.viewportRows, 2);
+  assert.equal(restored.screenRows, 2);
+  assert.equal(restored.rebased, true);
+  assert.equal(restored.content, "resized-1\nresized-2\n");
+});
+
 test("mouse-owning applications receive internal SGR wheel input", async () => {
   const tmux = new FakeTerminalTmux();
   tmux.mouseAll = true;

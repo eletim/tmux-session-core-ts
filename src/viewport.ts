@@ -105,6 +105,7 @@ interface ResolvedPosition {
 interface ViewportPosition extends ResolvedPosition {
   rows: number;
   format: ViewportFormat;
+  cursorAnchored: boolean;
 }
 
 export async function readViewport(
@@ -142,6 +143,7 @@ export async function readViewport(
     ...position,
     rows,
     format,
+    cursorAnchored: payload !== undefined,
   });
 }
 
@@ -172,6 +174,7 @@ export async function applyScroll(
         intent,
         rows,
         format,
+        true,
       ),
     };
   }
@@ -207,6 +210,7 @@ export async function applyScroll(
       intent,
       rows,
       format,
+      payload !== undefined,
     ),
   };
 }
@@ -219,6 +223,7 @@ async function moveViewport(
   intent: ScrollIntent,
   rows: number,
   format: ViewportFormat,
+  cursorAnchored: boolean,
 ): Promise<TerminalViewport> {
   const requested =
     current.offset + (intent.direction === "up" ? intent.lines : -intent.lines);
@@ -229,6 +234,7 @@ async function moveViewport(
     format,
     clamped: current.clamped || offset !== requested,
     rebased: current.rebased,
+    cursorAnchored,
   });
 }
 
@@ -274,7 +280,7 @@ async function captureViewport(
         offset,
         rows: Math.min(position.rows, latestFacts.screenRows),
         clamped: position.clamped || offset !== requestedOffset,
-        rebased: position.rebased,
+        rebased: position.rebased || position.cursorAnchored,
       },
       attempt + 1,
     );
