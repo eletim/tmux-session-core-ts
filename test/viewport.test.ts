@@ -583,6 +583,65 @@ test("mouse-owning applications receive internal SGR wheel input", async () => {
   );
 });
 
+test("classic mouse reports use raw coordinate bytes", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.cols = 120;
+  tmux.mouseStandard = true;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const result = await core.scroll("session-1", {
+    direction: "up",
+    lines: 1,
+    cell: { column: 96, row: 3 },
+  });
+
+  assert.deepEqual(result, { kind: "application" });
+  assert(
+    tmux.calls.some((call) =>
+      sameCall(call, [
+        "send-keys",
+        "-H",
+        "-t",
+        "session-1",
+        "1b",
+        "5b",
+        "4d",
+        "60",
+        "80",
+        "23",
+      ]),
+    ),
+  );
+});
+
+test("large SGR mouse batches are sent in bounded chunks", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.cols = 999;
+  tmux.mouseAll = true;
+  tmux.mouseSgr = true;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const result = await core.scroll("session-1", {
+    direction: "down",
+    lines: 10_000,
+    cell: { column: 999, row: 4 },
+  });
+
+  assert.deepEqual(result, { kind: "application" });
+  const report = "\u001b[<65;999;4M";
+  const sends = tmux.calls.filter(
+    (call) => call[0] === "send-keys" && call.includes("-l"),
+  );
+  assert(sends.length > 1);
+  assert(
+    sends.every((call) => Buffer.byteLength(call.at(-1) ?? "") <= 16 * 1024),
+  );
+  assert.equal(
+    sends.reduce((count, call) => count + (call.at(-1)?.length ?? 0), 0),
+    report.length * 10_000,
+  );
+});
+
 test("alternate screen without mouse ownership uses alternate-scroll keys", async () => {
   const tmux = new FakeTerminalTmux();
   tmux.alternate = true;

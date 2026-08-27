@@ -221,6 +221,40 @@ test(
     });
 
     await t.test(
+      "classic mouse tracking receives raw coordinate bytes",
+      async () => {
+        const inputFile = join(scratch, "classic-mouse-input");
+        const expected = Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0x80, 0x23]);
+        await core.create({
+          id: "classic-mouse-tui",
+          cwd: process.cwd(),
+          cols: 120,
+          rows: 5,
+          command: terminalReaderCommand(
+            "\\033[?1049h\\033[?1000h",
+            inputFile,
+            expected.length,
+          ),
+        });
+        await waitForFormat(
+          server,
+          "classic-mouse-tui",
+          "#{alternate_on}|#{mouse_standard_flag}|#{mouse_sgr_flag}",
+          (value) => value.trim() === "1|1|0",
+        );
+
+        const result = await core.scroll("classic-mouse-tui", {
+          direction: "up",
+          lines: 1,
+          cell: { column: 96, row: 3 },
+        });
+        assert.deepEqual(result, { kind: "application" });
+        await waitForFileSize(inputFile, expected.length);
+        assert.deepEqual(await readFile(inputFile), expected);
+      },
+    );
+
+    await t.test(
       "alternate screen without mouse uses cursor-key scrolling",
       async () => {
         const inputFile = join(scratch, "alternate-input");

@@ -7,6 +7,7 @@ const MAX_CURSOR_LENGTH = 4096;
 const MAX_VIEWPORT_ROWS = 10_000;
 const MAX_SCROLL_LINES = 10_000;
 const MAX_CAPTURE_RETRIES = 3;
+const MAX_MOUSE_SEND_BYTES = 16 * 1024;
 const TERMINAL_FACTS_FORMAT = [
   "#{history_size}",
   "#{history_limit}",
@@ -187,10 +188,7 @@ export async function applyScroll(
 
   if (!facts.dead && applicationOwnsMouse(facts)) {
     const cell = normalizeCell(intent.cell, facts);
-    const input = mouseInput(intent.direction, cell, facts).repeat(
-      intent.lines,
-    );
-    await tmux.run(["send-keys", "-t", id, "-l", "--", input]);
+    await sendMouseInput(tmux, id, intent.direction, cell, facts, intent.lines);
     return { kind: "application" };
   }
 
@@ -679,20 +677,67 @@ function normalizeCell(
   };
 }
 
+async function sendMouseInput(
+  tmux: TmuxRunner,
+  id: string,
+  direction: ScrollIntent["direction"],
+  cell: TerminalCell,
+  facts: TerminalFacts,
+  lines: number,
+): Promise<void> {
+  const report = mouseInput(direction, cell, facts);
+  const reportsPerChunk = Math.max(
+    1,
+    Math.floor(MAX_MOUSE_SEND_BYTES / report.length),
+  );
+
+  for (let sent = 0; sent < lines; sent += reportsPerChunk) {
+    const count = Math.min(reportsPerChunk, lines - sent);
+    if (facts.mouseSgr) {
+      await tmux.run([
+        "send-keys",
+        "-t",
+        id,
+        "-l",
+        "--",
+        report.toString("ascii").repeat(count),
+      ]);
+      continue;
+    }
+
+    const keys: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      for (const byte of report) {
+        keys.push(byte.toString(16).padStart(2, "0"));
+      }
+    }
+    await tmux.run(["send-keys", "-H", "-t", id, ...keys]);
+  }
+}
+
 function mouseInput(
   direction: ScrollIntent["direction"],
   cell: TerminalCell,
   facts: TerminalFacts,
-): string {
+): Buffer {
   const button = direction === "up" ? 64 : 65;
   if (facts.mouseSgr) {
-    return `\u001b[<${button};${cell.column};${cell.row}M`;
+    return Buffer.from(
+      `\u001b[<${button};${cell.column};${cell.row}M`,
+      "ascii",
+    );
   }
 
   const maxCoordinate = facts.mouseUtf8 ? 2015 : 223;
   const column = Math.min(cell.column, maxCoordinate);
   const row = Math.min(cell.row, maxCoordinate);
-  return "\u001b[M" + String.fromCodePoint(button + 32, column + 32, row + 32);
+  if (facts.mouseUtf8) {
+    return Buffer.from(
+      "\u001b[M" + String.fromCodePoint(button + 32, column + 32, row + 32),
+      "utf8",
+    );
+  }
+  return Buffer.from([0x1b, 0x5b, 0x4d, button + 32, column + 32, row + 32]);
 }
 
 function encodeCursor(payload: CursorPayload): ViewportCursor {
