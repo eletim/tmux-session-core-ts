@@ -102,6 +102,7 @@ interface ResolvedPosition {
   offset: number;
   clamped: boolean;
   rebased: boolean;
+  expectedViewportFingerprint?: string;
 }
 
 interface ViewportPosition extends ResolvedPosition {
@@ -130,7 +131,7 @@ export async function readViewport(
 
   let position: ResolvedPosition;
   if (payload !== undefined) {
-    position = await resolveCursor(tmux, id, payload, facts);
+    position = await resolveCursor(tmux, id, payload, facts, rows, format);
   } else if (options.target?.kind === "fraction") {
     position = {
       offset: Math.round((1 - options.target.value) * facts.historyRows),
@@ -163,7 +164,7 @@ export async function applyScroll(
   const resolved =
     payload === undefined
       ? { offset: 0, clamped: false, rebased: false }
-      : await resolveCursor(tmux, id, payload, facts);
+      : await resolveCursor(tmux, id, payload, facts, rows, format);
 
   if (payload !== undefined && payload.o > 0) {
     return {
@@ -230,6 +231,9 @@ async function moveViewport(
   const requested =
     current.offset + (intent.direction === "up" ? intent.lines : -intent.lines);
   const offset = clamp(requested, 0, facts.historyRows);
+  const expectedViewportFingerprint = cursorAnchored
+    ? fingerprint(await captureRows(tmux, id, offset, rows, format))
+    : undefined;
   return captureViewport(tmux, id, facts, {
     offset,
     rows,
@@ -237,6 +241,9 @@ async function moveViewport(
     clamped: current.clamped || offset !== requested,
     rebased: current.rebased,
     cursorAnchored,
+    ...(expectedViewportFingerprint === undefined
+      ? {}
+      : { expectedViewportFingerprint }),
   });
 }
 
@@ -255,7 +262,12 @@ async function captureViewport(
     position.format,
   );
   const latestFacts = await readTerminalFacts(tmux, id);
-  if (!sameCaptureSnapshot(facts, latestFacts)) {
+  const snapshotChanged = !sameCaptureSnapshot(facts, latestFacts);
+  const contentChanged =
+    position.cursorAnchored &&
+    position.expectedViewportFingerprint !== undefined &&
+    fingerprint(content) !== position.expectedViewportFingerprint;
+  if (snapshotChanged || contentChanged) {
     if (attempt >= MAX_CAPTURE_RETRIES) {
       throw new Error(
         `Terminal state did not stabilize while capturing session ${id}`,
@@ -265,16 +277,34 @@ async function captureViewport(
       facts.cols !== latestFacts.cols ||
       facts.screenRows !== latestFacts.screenRows ||
       facts.alternate !== latestFacts.alternate;
+    const historyChanged =
+      facts.historyRows !== latestFacts.historyRows ||
+      facts.historyLimit !== latestFacts.historyLimit ||
+      facts.historyBytes !== latestFacts.historyBytes;
     const historyGrowth = latestFacts.historyRows - facts.historyRows;
-    const pureAppend = isReliablePureAppend(facts, latestFacts);
-    const requestedOffset =
-      !geometryChanged && position.offset > 0 && pureAppend
-        ? position.offset + historyGrowth
-        : Math.round(
-            (position.offset / Math.max(facts.historyRows, 1)) *
-              latestFacts.historyRows,
-          );
+    const pureAppend =
+      !geometryChanged && isReliablePureAppend(facts, latestFacts);
+    let requestedOffset = position.offset;
+    if (position.offset > 0 && pureAppend) {
+      requestedOffset += historyGrowth;
+    } else if (geometryChanged || historyChanged || contentChanged) {
+      requestedOffset = Math.round(
+        (position.offset / Math.max(facts.historyRows, 1)) *
+          latestFacts.historyRows,
+      );
+    }
     const offset = clamp(requestedOffset, 0, latestFacts.historyRows);
+    const rows = Math.min(position.rows, latestFacts.screenRows);
+    const expectedViewportFingerprint = position.cursorAnchored
+      ? fingerprint(await captureRows(tmux, id, offset, rows, position.format))
+      : undefined;
+    const retryRebased =
+      position.rebased ||
+      (position.cursorAnchored &&
+        (geometryChanged ||
+          (position.offset > 0 &&
+            ((historyChanged && !pureAppend) ||
+              (contentChanged && !pureAppend)))));
 
     return captureViewport(
       tmux,
@@ -283,9 +313,12 @@ async function captureViewport(
       {
         ...position,
         offset,
-        rows: Math.min(position.rows, latestFacts.screenRows),
+        rows,
         clamped: position.clamped || offset !== requestedOffset,
-        rebased: position.rebased || position.cursorAnchored,
+        rebased: retryRebased,
+        ...(expectedViewportFingerprint === undefined
+          ? {}
+          : { expectedViewportFingerprint }),
       },
       attempt + 1,
     );
@@ -352,6 +385,8 @@ async function resolveCursor(
   id: string,
   payload: CursorPayload,
   facts: TerminalFacts,
+  rows: number,
+  format: ViewportFormat,
 ): Promise<ResolvedPosition> {
   const geometryChanged =
     payload.c !== facts.cols ||
@@ -383,8 +418,10 @@ async function resolveCursor(
   const unclamped = offset;
   offset = clamp(offset, 0, facts.historyRows);
   let clamped = offset !== unclamped;
+  let expectedViewportFingerprint: string | undefined;
 
   if (payload.o > 0 && !geometryChanged) {
+    const candidateOffset = offset;
     const candidate = await captureRows(
       tmux,
       id,
@@ -403,10 +440,20 @@ async function resolveCursor(
       const adjusted = clamp(relative, 0, facts.historyRows);
       clamped ||= adjusted !== relative;
       offset = adjusted;
+    } else if (
+      offset === candidateOffset &&
+      rows === payload.vr &&
+      format === payload.m
+    ) {
+      expectedViewportFingerprint = fingerprint(candidate);
     }
   }
 
-  return { offset, clamped, rebased };
+  expectedViewportFingerprint ??= fingerprint(
+    await captureRows(tmux, id, offset, rows, format),
+  );
+
+  return { offset, clamped, rebased, expectedViewportFingerprint };
 }
 
 function relativeOffset(

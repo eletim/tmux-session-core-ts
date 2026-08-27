@@ -24,6 +24,8 @@ class FakeTerminalTmux implements TmuxRunner {
   mouseSgr = false;
   onNextCapture: (() => void) | undefined;
   onEveryCapture: (() => void) | undefined;
+  onCapture: ((captureNumber: number) => void) | undefined;
+  captureCount = 0;
 
   async run(args: readonly string[]): Promise<string> {
     this.calls.push([...args]);
@@ -36,6 +38,8 @@ class FakeTerminalTmux implements TmuxRunner {
         if (args.includes("-J")) {
           return "legacy-history-and-screen\n";
         }
+        this.captureCount += 1;
+        this.onCapture?.(this.captureCount);
         if (this.onNextCapture !== undefined) {
           const callback = this.onNextCapture;
           this.onNextCapture = undefined;
@@ -190,6 +194,30 @@ test("pure append below history limit preserves its anchor without rebasing", as
 
   assert.equal(restored.rebased, false);
   assert.match(restored.content, /^history-3\n/);
+});
+
+test("pure append during final capture retry preserves anchor without rebasing", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  const mutateAtCapture = tmux.captureCount + 2;
+  tmux.onCapture = (captureNumber) => {
+    if (captureNumber === mutateAtCapture) {
+      tmux.history.push("history-5");
+      tmux.historyBytes += 100;
+    }
+  };
+
+  const restored = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.match(view.content, /^history-3\n/);
+  assert.match(restored.content, /^history-3\n/);
+  assert.equal(restored.rebased, false);
+  assert.equal(restored.clamped, false);
 });
 
 test("net-positive growth at history limit deterministically rebases", async () => {
@@ -388,6 +416,59 @@ test("full viewport fingerprint detects equal-size eviction after a repeated fir
 
   assert.equal(restored.rebased, true);
   assert.match(restored.content, /^same\nnew\n/);
+});
+
+test("final cursor capture detects equal-size blank-row eviction race", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.history = ["old", "x", "", ""];
+  tmux.historyBytes = 100;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  assert.match(view.content, /^\n\n/);
+
+  const mutateAtCapture = tmux.captureCount + 2;
+  tmux.onCapture = (captureNumber) => {
+    if (captureNumber === mutateAtCapture) {
+      tmux.history = ["x", "", "", "new"];
+    }
+  };
+  const rebased = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: view.cursor },
+  });
+
+  assert.equal(rebased.historyRows, view.historyRows);
+  assert.equal(rebased.rebased, true);
+  assert.match(rebased.content, /^\nnew\n/);
+
+  const roundTrip = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: rebased.cursor },
+  });
+  assert.equal(roundTrip.content, rebased.content);
+  assert.equal(roundTrip.rebased, false);
+});
+
+test("repeated equal-size final capture races fail after retry exhaustion", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.history = ["r0", "r1", "r2", "r3"];
+  tmux.historyBytes = 100;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  let nextRow = 4;
+  tmux.onEveryCapture = () => {
+    tmux.history = [...tmux.history.slice(1), `r${nextRow}`];
+    nextRow += 1;
+  };
+
+  await assert.rejects(
+    core.viewport("session-1", {
+      target: { kind: "cursor", cursor: view.cursor },
+    }),
+    /Terminal state did not stabilize/,
+  );
 });
 
 test("mouse-owning applications receive internal SGR wheel input", async () => {
