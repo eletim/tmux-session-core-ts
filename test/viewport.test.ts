@@ -153,6 +153,28 @@ test("live viewport captures physical screen rows without joining wraps", async 
   assert.equal(argumentAfter(capture, "-E"), "3");
 });
 
+test("wide 10000-row viewports are captured in byte-bounded chunks", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.cols = 1_100;
+  tmux.screen = Array.from({ length: 10_000 }, (_, index) => `screen-${index}`);
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const view = await core.viewport("session-1", { rows: 10_000 });
+
+  assert.equal(view.viewportRows, 10_000);
+  const captures = tmux.calls.filter((call) => call[0] === "capture-pane");
+  assert(captures.length > 1);
+  assert(
+    captures.every(
+      (call) =>
+        Number(argumentAfter(call, "-E")) -
+          Number(argumentAfter(call, "-S")) +
+          1 <=
+        238,
+    ),
+  );
+});
+
 test("default viewport rows follow screen growth during capture retry", async () => {
   const tmux = new FakeTerminalTmux();
   tmux.screen = ["short-1", "short-2"];

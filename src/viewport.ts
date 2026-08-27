@@ -7,6 +7,7 @@ const MAX_CURSOR_BASE_LENGTH = 4096;
 const MAX_VIEWPORT_ROWS = 10_000;
 const MAX_SCROLL_LINES = 10_000;
 const MAX_CAPTURE_RETRIES = 3;
+const MAX_CAPTURE_CHUNK_BYTES = 1024 * 1024;
 const MAX_MOUSE_SEND_BYTES = 16 * 1024;
 const TERMINAL_FACTS_FORMAT = [
   "#{history_size}",
@@ -248,6 +249,7 @@ async function moveViewport(
       offset,
       rows,
       format,
+      facts.cols,
     );
     const latestFacts = await readTerminalFacts(tmux, id);
     const snapshotChanged = !sameCaptureSnapshot(facts, latestFacts);
@@ -295,7 +297,14 @@ async function moveViewport(
         ? latestFacts.screenRows
         : Math.min(rows, latestFacts.screenRows);
       const expectedSourceFingerprint = fingerprint(
-        await captureRows(tmux, id, sourceOffset, nextRows, format),
+        await captureRows(
+          tmux,
+          id,
+          sourceOffset,
+          nextRows,
+          format,
+          latestFacts.cols,
+        ),
       );
       const rebased =
         current.rebased ||
@@ -347,16 +356,32 @@ async function captureScrollPair(
   destinationOffset: number,
   rows: number,
   format: ViewportFormat,
+  cols: number,
 ): Promise<{ source: string; destination: string; consistent: boolean }> {
-  const sourceBefore = await captureRows(tmux, id, sourceOffset, rows, format);
+  const sourceBefore = await captureRows(
+    tmux,
+    id,
+    sourceOffset,
+    rows,
+    format,
+    cols,
+  );
   const destination = await captureRows(
     tmux,
     id,
     destinationOffset,
     rows,
     format,
+    cols,
   );
-  const sourceAfter = await captureRows(tmux, id, sourceOffset, rows, format);
+  const sourceAfter = await captureRows(
+    tmux,
+    id,
+    sourceOffset,
+    rows,
+    format,
+    cols,
+  );
 
   return {
     source: sourceAfter,
@@ -378,6 +403,7 @@ async function captureViewport(
     position.offset,
     position.rows,
     position.format,
+    facts.cols,
   );
   const latestFacts = await readTerminalFacts(tmux, id);
   const snapshotChanged = !sameCaptureSnapshot(facts, latestFacts);
@@ -421,7 +447,16 @@ async function captureViewport(
       ? latestFacts.screenRows
       : Math.min(position.rows, latestFacts.screenRows);
     const expectedViewportFingerprint = position.cursorAnchored
-      ? fingerprint(await captureRows(tmux, id, offset, rows, position.format))
+      ? fingerprint(
+          await captureRows(
+            tmux,
+            id,
+            offset,
+            rows,
+            position.format,
+            latestFacts.cols,
+          ),
+        )
       : undefined;
     const retryRebased =
       position.rebased ||
@@ -560,6 +595,7 @@ async function resolveCursor(
       offset,
       payload.vr,
       payload.m,
+      facts.cols,
     );
     const compareFullViewport = !pureAppend;
     const candidateFingerprint = fingerprint(
@@ -582,7 +618,7 @@ async function resolveCursor(
   }
 
   expectedViewportFingerprint ??= fingerprint(
-    await captureRows(tmux, id, offset, rows, format),
+    await captureRows(tmux, id, offset, rows, format, facts.cols),
   );
 
   return { offset, clamped, rebased, expectedViewportFingerprint };
@@ -666,20 +702,54 @@ async function captureRows(
   offset: number,
   rows: number,
   format: ViewportFormat,
+  cols: number,
 ): Promise<string> {
-  const start = -offset;
-  const end = start + rows - 1;
-  return tmux.run([
-    "capture-pane",
-    "-p",
-    ...(format === "ansi" ? ["-e"] : []),
-    "-S",
-    String(start),
-    "-E",
-    String(end),
-    "-t",
-    id,
-  ]);
+  const estimatedBytesPerCell = format === "ansi" ? 128 : 16;
+  const estimatedBytesPerRow = cols * estimatedBytesPerCell + 1;
+  const rowsPerChunk = Math.max(
+    1,
+    Math.floor(MAX_CAPTURE_CHUNK_BYTES / estimatedBytesPerRow),
+  );
+  const capture = async (): Promise<string> => {
+    const chunks: string[] = [];
+    const firstRow = -offset;
+
+    for (let captured = 0; captured < rows; captured += rowsPerChunk) {
+      const chunkRows = Math.min(rowsPerChunk, rows - captured);
+      const start = firstRow + captured;
+      const end = start + chunkRows - 1;
+      chunks.push(
+        await tmux.run([
+          "capture-pane",
+          "-p",
+          ...(format === "ansi" ? ["-e"] : []),
+          "-S",
+          String(start),
+          "-E",
+          String(end),
+          "-t",
+          id,
+        ]),
+      );
+    }
+    return chunks.join("");
+  };
+
+  let content = await capture();
+  if (rows <= rowsPerChunk) {
+    return content;
+  }
+
+  for (let attempt = 0; attempt < MAX_CAPTURE_RETRIES; attempt += 1) {
+    const verified = await capture();
+    if (fingerprint(verified) === fingerprint(content)) {
+      return verified;
+    }
+    content = verified;
+  }
+  throw new Error(
+    `Terminal state did not stabilize while capturing session ${id}`,
+  );
 }
 
 function applicationOwnsMouse(facts: TerminalFacts): boolean {
