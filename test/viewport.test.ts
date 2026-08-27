@@ -250,6 +250,31 @@ test("pure append during final capture retry preserves anchor without rebasing",
   assert.equal(restored.clamped, false);
 });
 
+test("cursor scroll retry preserves source anchor across pure append", async () => {
+  const tmux = new FakeTerminalTmux();
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  const mutateAtCapture = tmux.captureCount + 2;
+  tmux.onCapture = (captureNumber) => {
+    if (captureNumber === mutateAtCapture) {
+      tmux.history.push("history-5");
+      tmux.historyBytes += 100;
+    }
+  };
+
+  const result = await core.scroll("session-1", {
+    cursor: view.cursor,
+    direction: "up",
+    lines: 1,
+  });
+
+  assert.equal(result.kind, "viewport");
+  assert.match(result.viewport.content, /^history-2\n/);
+  assert.equal(result.viewport.rebased, false);
+});
+
 test("net-positive growth at history limit deterministically rebases", async () => {
   const tmux = new FakeTerminalTmux();
   tmux.historyLimit = 100;
@@ -476,6 +501,36 @@ test("final cursor capture detects equal-size blank-row eviction race", async ()
     target: { kind: "cursor", cursor: rebased.cursor },
   });
   assert.equal(roundTrip.content, rebased.content);
+  assert.equal(roundTrip.rebased, false);
+});
+
+test("cursor scroll revalidates source before accepting its destination", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.history = ["old", "x", "", ""];
+  tmux.historyBytes = 100;
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+  const view = await core.viewport("session-1", {
+    target: { kind: "fraction", value: 0.5 },
+  });
+  const mutateAtCapture = tmux.captureCount + 2;
+  tmux.onCapture = (captureNumber) => {
+    if (captureNumber === mutateAtCapture) {
+      tmux.history = ["x", "", "", "new"];
+    }
+  };
+
+  const result = await core.scroll("session-1", {
+    cursor: view.cursor,
+    direction: "up",
+    lines: 1,
+  });
+
+  assert.equal(result.kind, "viewport");
+  assert.equal(result.viewport.rebased, true);
+  const roundTrip = await core.viewport("session-1", {
+    target: { kind: "cursor", cursor: result.viewport.cursor },
+  });
+  assert.equal(roundTrip.content, result.viewport.content);
   assert.equal(roundTrip.rebased, false);
 });
 

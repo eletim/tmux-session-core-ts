@@ -232,13 +232,92 @@ async function moveViewport(
   format: ViewportFormat,
   cursorAnchored: boolean,
   rowsFollowScreen: boolean,
+  attempt = 0,
 ): Promise<TerminalViewport> {
   const requested =
     current.offset + (intent.direction === "up" ? intent.lines : -intent.lines);
   const offset = clamp(requested, 0, facts.historyRows);
-  const expectedViewportFingerprint = cursorAnchored
-    ? fingerprint(await captureRows(tmux, id, offset, rows, format))
-    : undefined;
+  let expectedViewportFingerprint: string | undefined;
+
+  if (cursorAnchored) {
+    const pair = await captureScrollPair(
+      tmux,
+      id,
+      current.offset,
+      offset,
+      rows,
+      format,
+    );
+    const latestFacts = await readTerminalFacts(tmux, id);
+    const snapshotChanged = !sameCaptureSnapshot(facts, latestFacts);
+    const sourceChanged =
+      current.expectedViewportFingerprint === undefined ||
+      fingerprint(pair.source) !== current.expectedViewportFingerprint;
+
+    if (snapshotChanged || sourceChanged) {
+      if (attempt >= MAX_CAPTURE_RETRIES) {
+        throw new Error(
+          `Terminal state did not stabilize while capturing session ${id}`,
+        );
+      }
+      const geometryChanged =
+        facts.cols !== latestFacts.cols ||
+        facts.screenRows !== latestFacts.screenRows ||
+        facts.alternate !== latestFacts.alternate;
+      const historyChanged =
+        facts.historyRows !== latestFacts.historyRows ||
+        facts.historyLimit !== latestFacts.historyLimit ||
+        facts.historyBytes !== latestFacts.historyBytes;
+      const pureAppend =
+        !geometryChanged && isReliablePureAppend(facts, latestFacts);
+      let requestedSourceOffset = current.offset;
+      if (current.offset > 0 && pureAppend) {
+        requestedSourceOffset += latestFacts.historyRows - facts.historyRows;
+      } else if (geometryChanged || historyChanged || sourceChanged) {
+        requestedSourceOffset = Math.round(
+          (current.offset / Math.max(facts.historyRows, 1)) *
+            latestFacts.historyRows,
+        );
+      }
+      const sourceOffset = clamp(
+        requestedSourceOffset,
+        0,
+        latestFacts.historyRows,
+      );
+      const nextRows = rowsFollowScreen
+        ? latestFacts.screenRows
+        : Math.min(rows, latestFacts.screenRows);
+      const expectedSourceFingerprint = fingerprint(
+        await captureRows(tmux, id, sourceOffset, nextRows, format),
+      );
+      const rebased =
+        current.rebased ||
+        geometryChanged ||
+        (current.offset > 0 &&
+          ((historyChanged && !pureAppend) || (sourceChanged && !pureAppend)));
+
+      return moveViewport(
+        tmux,
+        id,
+        latestFacts,
+        {
+          offset: sourceOffset,
+          clamped: current.clamped || sourceOffset !== requestedSourceOffset,
+          rebased,
+          expectedViewportFingerprint: expectedSourceFingerprint,
+        },
+        intent,
+        nextRows,
+        format,
+        true,
+        rowsFollowScreen,
+        attempt + 1,
+      );
+    }
+
+    expectedViewportFingerprint = fingerprint(pair.destination);
+  }
+
   return captureViewport(tmux, id, facts, {
     offset,
     rows,
@@ -251,6 +330,37 @@ async function moveViewport(
       ? {}
       : { expectedViewportFingerprint }),
   });
+}
+
+async function captureScrollPair(
+  tmux: TmuxRunner,
+  id: string,
+  sourceOffset: number,
+  destinationOffset: number,
+  rows: number,
+  format: ViewportFormat,
+): Promise<{ source: string; destination: string }> {
+  const oldestOffset = Math.max(sourceOffset, destinationOffset);
+  const newestOffset = Math.min(sourceOffset, destinationOffset);
+  const content = await captureRows(
+    tmux,
+    id,
+    oldestOffset,
+    oldestOffset - newestOffset + rows,
+    format,
+  );
+  const physicalRows = content.endsWith("\n")
+    ? content.slice(0, -1).split("\n")
+    : content.split("\n");
+  const viewportAt = (offset: number): string => {
+    const start = oldestOffset - offset;
+    return physicalRows.slice(start, start + rows).join("\n") + "\n";
+  };
+
+  return {
+    source: viewportAt(sourceOffset),
+    destination: viewportAt(destinationOffset),
+  };
 }
 
 async function captureViewport(
