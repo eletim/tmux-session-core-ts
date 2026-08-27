@@ -107,6 +107,7 @@ interface ResolvedPosition {
 
 interface ViewportPosition extends ResolvedPosition {
   rows: number;
+  rowsFollowScreen: boolean;
   format: ViewportFormat;
   cursorAnchored: boolean;
 }
@@ -145,6 +146,7 @@ export async function readViewport(
   return captureViewport(tmux, id, facts, {
     ...position,
     rows,
+    rowsFollowScreen: options.rows === undefined && payload === undefined,
     format,
     cursorAnchored: payload !== undefined,
   });
@@ -178,6 +180,7 @@ export async function applyScroll(
         rows,
         format,
         true,
+        false,
       ),
     };
   }
@@ -214,6 +217,7 @@ export async function applyScroll(
       rows,
       format,
       payload !== undefined,
+      intent.rows === undefined && payload === undefined,
     ),
   };
 }
@@ -227,6 +231,7 @@ async function moveViewport(
   rows: number,
   format: ViewportFormat,
   cursorAnchored: boolean,
+  rowsFollowScreen: boolean,
 ): Promise<TerminalViewport> {
   const requested =
     current.offset + (intent.direction === "up" ? intent.lines : -intent.lines);
@@ -237,6 +242,7 @@ async function moveViewport(
   return captureViewport(tmux, id, facts, {
     offset,
     rows,
+    rowsFollowScreen,
     format,
     clamped: current.clamped || offset !== requested,
     rebased: current.rebased,
@@ -294,7 +300,9 @@ async function captureViewport(
       );
     }
     const offset = clamp(requestedOffset, 0, latestFacts.historyRows);
-    const rows = Math.min(position.rows, latestFacts.screenRows);
+    const rows = position.rowsFollowScreen
+      ? latestFacts.screenRows
+      : Math.min(position.rows, latestFacts.screenRows);
     const expectedViewportFingerprint = position.cursorAnchored
       ? fingerprint(await captureRows(tmux, id, offset, rows, position.format))
       : undefined;

@@ -140,6 +140,36 @@ test("live viewport captures physical screen rows without joining wraps", async 
   assert.equal(argumentAfter(capture, "-E"), "3");
 });
 
+test("default viewport rows follow screen growth during capture retry", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.screen = ["short-1", "short-2"];
+  tmux.onNextCapture = () => {
+    tmux.screen = ["grown-1", "grown-2", "grown-3", "grown-4"];
+  };
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const view = await core.viewport("session-1");
+
+  assert.equal(view.screenRows, 4);
+  assert.equal(view.viewportRows, 4);
+  assert.equal(view.content, "grown-1\ngrown-2\ngrown-3\ngrown-4\n");
+});
+
+test("explicit viewport rows do not expand with the screen", async () => {
+  const tmux = new FakeTerminalTmux();
+  tmux.screen = ["short-1", "short-2"];
+  tmux.onNextCapture = () => {
+    tmux.screen = ["grown-1", "grown-2", "grown-3", "grown-4"];
+  };
+  const core = new SessionCore({ serverName: "test-server" }, tmux);
+
+  const view = await core.viewport("session-1", { rows: 1 });
+
+  assert.equal(view.screenRows, 4);
+  assert.equal(view.viewportRows, 1);
+  assert.equal(view.content, "grown-1\n");
+});
+
 test("cursor scrolling and fraction seeking use independent positions", async () => {
   const tmux = new FakeTerminalTmux();
   const core = new SessionCore({ serverName: "test-server" }, tmux);
