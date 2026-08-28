@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import { TmuxClient, TmuxCommandError, type TmuxRunner } from "./tmux.js";
+import {
+  applyScroll,
+  readViewport,
+  type ScrollIntent,
+  type ScrollResult,
+  type TerminalViewport,
+  type ViewportOptions,
+} from "./viewport.js";
 
 const DEFAULT_SERVER_NAME = "tmux-session-core-ts";
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
@@ -130,6 +138,19 @@ export class SessionCore {
   async screen(id: string): Promise<string> {
     await this.get(id);
     return this.tmux.run(["capture-pane", "-p", "-J", "-S", "-", "-t", id]);
+  }
+
+  async viewport(
+    id: string,
+    options: ViewportOptions = {},
+  ): Promise<TerminalViewport> {
+    await this.get(id);
+    return readViewport(this.tmux, id, options);
+  }
+
+  async scroll(id: string, intent: ScrollIntent): Promise<ScrollResult> {
+    await this.get(id);
+    return applyScroll(this.tmux, id, intent);
   }
 
   async input(

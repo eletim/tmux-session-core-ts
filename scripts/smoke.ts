@@ -41,8 +41,14 @@ async function createPhase(server: string): Promise<void> {
   assert.equal(await core.getMetadata(sessionId, "empty"), "");
   await core.input(sessionId, "hello-from-input");
   await waitForScreen(core, "hello-from-input");
+  const scrollLines = Array.from(
+    { length: 40 },
+    (_, index) => `scroll-line-${index + 1}`,
+  ).join("\n");
+  await core.input(sessionId, scrollLines + "\n", { submit: false });
+  await waitForScreen(core, "scroll-line-40");
   console.log(
-    "create/native facts/metadata/input/screen passed; controller exiting",
+    "create/native facts/metadata/input/screen/scrollback passed; controller exiting",
   );
 }
 
@@ -62,7 +68,21 @@ async function rediscoverPhase(server: string): Promise<void> {
   assert.equal(await core.getMetadata(sessionId, "title"), "再発見テスト 🌏");
   assert(!("cwd" in (await core.listMetadata(sessionId))));
   assert(!("currentCommand" in (await core.listMetadata(sessionId))));
-  await waitForScreen(core, "hello-from-input");
+  await waitForScreen(core, "scroll-line-40");
+
+  const live = await core.viewport(sessionId);
+  const older = await core.scroll(sessionId, {
+    cursor: live.cursor,
+    direction: "up",
+    lines: 10,
+  });
+  assert.equal(older.kind, "viewport");
+  assert.equal(older.viewport.live, false);
+  const restartedCore = new SessionCore({ serverName: server });
+  const restored = await restartedCore.viewport(sessionId, {
+    target: { kind: "cursor", cursor: older.viewport.cursor },
+  });
+  assert.equal(restored.content, older.viewport.content);
 
   await core.setMetadata(sessionId, "title", "updated");
   await core.deleteMetadata(sessionId, "empty");
@@ -81,7 +101,7 @@ async function rediscoverPhase(server: string): Promise<void> {
   await assert.rejects(core.get(sessionId), SessionNotFoundError);
   await assert.rejects(core.listMetadata(sessionId), SessionNotFoundError);
   console.log(
-    "rediscovery/metadata update-delete/stop/final screen/session delete passed",
+    "rediscovery/viewport restart/metadata update-delete/stop/final screen/session delete passed",
   );
 }
 
